@@ -10,6 +10,8 @@ import { minorPointFor } from "./ellipse";
 import { ORIGIN_ID, type SketchEllipse, type SketchSpline, type SketchArc, type SketchCircle, type SketchConstraint, type SketchCurve, type SketchData, type SketchLine, type SketchPoint } from "./types";
 import { toSketch, type PlaneFrame, type Vec3 } from "./planes";
 import type { EdgeRef } from "../geometry/topoRef";
+import { crossings, curveParam } from "./curves";
+import { isWavy, offsetWavy, splitWavy, trimWavy } from "./curveEdits";
 
 type P2 = [number, number];
 const TAU = Math.PI * 2;
@@ -218,10 +220,12 @@ export function mergeCoincident(s: SketchData, pointId: string): SketchData {
       case "arc":
         return { ...c, center: to(c.center), start: to(c.start), end: to(c.end) };
       case "ellipse":
-        return { ...c, center: to(c.center), major: to(c.major), minor: to(c.minor) };
+        return { ...c, center: to(c.center), major: to(c.major), minor: to(c.minor), ...(c.start && c.end ? { start: to(c.start), end: to(c.end) } : {}) };
       case "spline": {
-        const tangents = c.tangents ? Object.fromEntries(Object.entries(c.tangents).map(([k, v]) => [to(k), v])) : undefined;
-        return { ...c, points: c.points.map(to), ...(tangents ? { tangents } : {}) };
+        const remap = (h?: Record<string, [number, number]>) => (h ? Object.fromEntries(Object.entries(h).map(([k, v]) => [to(k), v])) : undefined);
+        const tangents = remap(c.tangents);
+        const tangentsIn = remap(c.tangentsIn);
+        return { ...c, points: c.points.map(to), ...(tangents ? { tangents } : {}), ...(tangentsIn ? { tangentsIn } : {}) };
       }
     }
   });
@@ -382,14 +386,8 @@ function onArc(s: SketchData, c: SketchCircle | SketchArc, p: P2): boolean {
 
 /** Points where curves `a` and `b` cross (each within its own extent). */
 export function intersections(s: SketchData, a: SketchCurve, b: SketchCurve): P2[] {
-  const wavy = (c: SketchCurve) => c.type === "spline" || c.type === "ellipse";
-  // Two splines/ellipses crossing each other aren't worked out (yet).
-  if (wavy(a) && wavy(b)) return [];
-  // A spline or ellipse crossing a line, arc or circle: follow it as short straight pieces.
-  if (wavy(a) || wavy(b)) {
-    const [k, w] = (wavy(a) ? [b, a] : [a, b]) as [SketchLine | SketchArc | SketchCircle, SketchSpline | SketchEllipse];
-    return crossingsWithPath(s, k, w.type === "spline" ? splinePath(s, w, 48) : ellipsePoints(s, w, 1024));
-  }
+  // A spline or ellipse crossing anything: found on short straight pieces, then homed in on the true curves.
+  if (isWavy(a) || isWavy(b)) return crossings(curveParam(s, a), curveParam(s, b)).map((c) => c.p);
   const seg = (l: SketchLine) => [pointPos(s, l.p1), pointPos(s, l.p2)] as [P2, P2];
   const onSeg = (l: SketchLine, p: P2) => {
     const [A, B] = seg(l);
@@ -434,44 +432,6 @@ export function intersections(s: SketchData, a: SketchCurve, b: SketchCurve): P2
   return pts.filter((p) => onArc(s, a as SketchArc, p) && onArc(s, b as SketchArc, p));
 }
 
-/** Where a line, arc or circle crosses a path of short straight pieces (a spline or ellipse drawn out). */
-function crossingsWithPath(s: SketchData, k: SketchLine | SketchArc | SketchCircle, path: P2[]): P2[] {
-  const out: P2[] = [];
-  const push = (p: P2) => {
-    // Neighbouring pieces can both report a crossing right at their shared end.
-    if (!out.some((q) => len(sub(p, q)) < 1e-6)) out.push(p);
-  };
-  for (let i = 0; i + 1 < path.length; i++) {
-    const C = path[i];
-    const D = path[i + 1];
-    const q = sub(D, C);
-    if (len(q) < 1e-12) continue;
-    if (k.type === "line") {
-      const A = pointPos(s, k.p1);
-      const r = sub(pointPos(s, k.p2), A);
-      const den = cross(r, q);
-      if (Math.abs(den) < 1e-12) continue;
-      const t = cross(sub(C, A), q) / den;
-      const u = cross(sub(C, A), r) / den;
-      if (t >= -1e-9 && t <= 1 + 1e-9 && u >= -1e-9 && u <= 1 + 1e-9) push(add(A, mul(r, t)));
-    } else {
-      const { c: O, r } = circleOf(s, k);
-      const f = sub(C, O);
-      const qa = dot(q, q);
-      const qb = 2 * dot(f, q);
-      const disc = qb * qb - 4 * qa * (dot(f, f) - r * r);
-      if (disc < 0) continue;
-      const root = Math.sqrt(disc);
-      for (const t of [(-qb - root) / (2 * qa), (-qb + root) / (2 * qa)]) {
-        if (t < -1e-9 || t > 1 + 1e-9) continue;
-        const p = add(C, mul(q, t));
-        if (onArc(s, k, p)) push(p);
-      }
-    }
-  }
-  return out;
-}
-
 /** Position of a point along a curve (line: 0–1; arc/circle: angle from its start). */
 function paramOf(s: SketchData, c: SketchCurve, p: P2): number {
   if (c.type === "spline" || c.type === "ellipse") return 0;
@@ -484,6 +444,12 @@ function paramOf(s: SketchData, c: SketchCurve, p: P2): number {
   return norm(Math.atan2(p[1] - C[1], p[0] - C[0]) - arcSpan(s, c)[0]);
 }
 
+/** The end point of `c` sitting at p (to a millionth of a millimetre), if there is one. */
+function endAt(s: SketchData, c: SketchCurve, p: P2): string | null {
+  const ends = c.type === "line" ? [c.p1, c.p2] : c.type === "arc" ? [c.start, c.end] : c.type === "spline" ? (c.closed ? [] : [c.points[0], c.points[c.points.length - 1]]) : c.type === "ellipse" && c.start && c.end ? [c.start, c.end] : [];
+  return ends.find((id) => id !== ORIGIN_ID && len(sub(pointPos(s, id), p)) < 1e-6) ?? null;
+}
+
 /** Constraints that stay true when a curve is shortened (others, like its length, are dropped). */
 const KEEPS_WHEN_TRIMMED = new Set(["horizontal", "vertical", "parallel", "perpendicular", "tangent", "pointOnLine", "pointOnCircle", "concentric", "radius", "diameter", "equal", "fix", "offset", "pointOnCurve"]);
 
@@ -494,8 +460,7 @@ const KEEPS_WHEN_TRIMMED = new Set(["horizontal", "vertical", "parallel", "perpe
 export function trimAt(s: SketchData, curveId: string, at: { x: number; y: number }): EditResult {
   const target = curveById(s, curveId);
   if (!target) return { sketch: s, error: "Click a line, arc or circle to trim." };
-  if (target.type === "spline") return { sketch: s, error: "Splines can't be trimmed — delete it, or drag its points to reshape it." };
-  if (target.type === "ellipse") return { sketch: s, error: "Ellipses can't be trimmed yet — delete it, or drag its points to reshape it." };
+  if (isWavy(target)) return trimWavy(s, target, at);
   const cuts: Cut[] = [];
   for (const other of s.curves) {
     if (other.id === target.id) continue;
@@ -511,14 +476,24 @@ export function trimAt(s: SketchData, curveId: string, at: { x: number; y: numbe
   const before = inside.filter((c) => c.at < click).sort((a, b) => b.at - a.at)[0];
   const after = inside.filter((c) => c.at > click).sort((a, b) => a.at - b.at)[0];
 
+  const reused = new Set<string>();
   const newPoint = (cut: Cut) => {
-    const id = sketchId("p");
     const other = curveById(s, cut.by)!;
+    // Where the other curve ends right on this one (a T), cut at its end point: no new point needed.
+    const end = endAt(s, other, cut.point);
+    if (end) {
+      reused.add(end);
+      return { point: { id: end, x: cut.point[0], y: cut.point[1] }, pts: [] as SketchPoint[], constraints: [] as SketchConstraint[] };
+    }
+    const id = sketchId("p");
     const on: SketchConstraint[] = [con(onCurveType(other), [id, cut.by])];
-    return { point: { id, x: cut.point[0], y: cut.point[1] }, constraints: on };
+    const point = { id, x: cut.point[0], y: cut.point[1] };
+    return { point, pts: [point], constraints: on };
   };
   // A shortened line is no longer equal in length to anything (an arc keeps its radius, so stays equal).
-  const keep = s.constraints.filter((k) => !k.refs.includes(curveId) || (KEEPS_WHEN_TRIMMED.has(k.type) && !(k.type === "equal" && target.type === "line")));
+  // A reused end point is now the curve's own end, so it no longer needs holding on it.
+  const keep0 = s.constraints.filter((k) => !k.refs.includes(curveId) || (KEEPS_WHEN_TRIMMED.has(k.type) && !(k.type === "equal" && target.type === "line")));
+  const keep = () => keep0.filter((k) => !((k.type === "pointOnLine" || k.type === "pointOnCircle") && reused.has(k.refs[0]) && k.refs[1] === curveId));
   const others = s.curves.filter((c) => c.id !== curveId);
 
   if (target.type === "circle") {
@@ -529,7 +504,7 @@ export function trimAt(s: SketchData, curveId: string, at: { x: number; y: numbe
     const a = newPoint(hi);
     const b = newPoint(lo);
     const arc: SketchArc = { id: curveId, type: "arc", center: target.center, start: a.point.id, end: b.point.id, construction: target.construction };
-    return settle({ points: [...s.points, a.point, b.point], curves: [...others, arc], constraints: [...keep, ...a.constraints, ...b.constraints] });
+    return settle({ points: [...s.points, ...a.pts, ...b.pts], curves: [...others, arc], constraints: [...keep(), ...a.constraints, ...b.constraints] });
   }
 
   const start = target.type === "line" ? target.p1 : target.start;
@@ -539,23 +514,23 @@ export function trimAt(s: SketchData, curveId: string, at: { x: number; y: numbe
 
   if (!before && after) {
     const a = newPoint(after);
-    return tidy(s, { points: [...s.points, a.point], curves: [...others, piece(a.point.id, finish, curveId)], constraints: [...keep, ...a.constraints] });
+    return tidy(s, { points: [...s.points, ...a.pts], curves: [...others, piece(a.point.id, finish, curveId)], constraints: [...keep(), ...a.constraints] });
   }
   if (before && !after) {
     const b = newPoint(before);
-    return tidy(s, { points: [...s.points, b.point], curves: [...others, piece(start, b.point.id, curveId)], constraints: [...keep, ...b.constraints] });
+    return tidy(s, { points: [...s.points, ...b.pts], curves: [...others, piece(start, b.point.id, curveId)], constraints: [...keep(), ...b.constraints] });
   }
   // A piece in the middle: split into two.
   const b = newPoint(before!);
   const a = newPoint(after!);
   const secondId = sketchId(target.type === "line" ? "l" : "a");
-  const copied = keep
+  const copied = keep()
     .filter((k) => k.refs.includes(curveId) && (k.type === "horizontal" || k.type === "vertical"))
     .map((k) => ({ ...k, id: sketchId("c"), refs: k.refs.map((r) => (r === curveId ? secondId : r)) }));
   return tidy(s, {
-    points: [...s.points, b.point, a.point],
+    points: [...s.points, ...b.pts, ...a.pts],
     curves: [...others, piece(start, b.point.id, curveId), piece(a.point.id, finish, secondId)],
-    constraints: [...keep, ...b.constraints, ...a.constraints, ...copied],
+    constraints: [...keep(), ...b.constraints, ...a.constraints, ...copied],
   });
 }
 
@@ -678,7 +653,7 @@ export function offsetCurves(s: SketchData, curveId: string, at: { x: number; y:
   const dist = r.value;
   const clicked = curveById(s, curveId);
   if (!clicked) return fail("Click a line, arc or circle to offset.");
-  if (clicked.type === "spline" || clicked.type === "ellipse") return fail(`${clicked.type === "spline" ? "Splines" : "Ellipses"} can't be offset yet — offset lines, arcs and circles.`);
+  if (isWavy(clicked)) return offsetWavy(s, clicked, at, distanceText);
   const P: P2 = [at.x, at.y];
 
   if (clicked.type === "circle") {
@@ -943,9 +918,21 @@ export function mirrorCurves(s: SketchData, axisId: string, curveIds: string[]):
     } else if (c.type === "spline") {
       const ids = c.points.map(copyOf);
       const tangents = movedHandles(s, c, ids, (p) => mirrorPoint(s, axis, p));
-      curves.push({ id: sketchId("sp"), type: "spline", points: ids, closed: c.closed, construction: c.construction, ...(c.conic !== undefined ? { conic: c.conic } : {}), ...(tangents ? { tangents } : {}) });
+      const tangentsIn = movedHandles(s, c, ids, (p) => mirrorPoint(s, axis, p), "tangentsIn");
+      curves.push({
+        id: sketchId("sp"),
+        type: "spline",
+        points: ids,
+        closed: c.closed,
+        construction: c.construction,
+        ...(c.conic !== undefined ? { conic: c.conic } : {}),
+        ...(tangents ? { tangents } : {}),
+        ...(tangentsIn ? { tangentsIn } : {}),
+      });
     } else if (c.type === "ellipse") {
-      curves.push({ id: sketchId("el"), type: "ellipse", center: copyOf(c.center), major: copyOf(c.major), minor: copyOf(c.minor), construction: c.construction });
+      // Part of an ellipse runs the other way round in the mirror, like an arc.
+      const ends = c.start && c.end ? { start: copyOf(c.end), end: copyOf(c.start) } : {};
+      curves.push({ id: sketchId("el"), type: "ellipse", center: copyOf(c.center), major: copyOf(c.major), minor: copyOf(c.minor), construction: c.construction, ...ends });
     } else {
       // A mirror image runs the other way round, so its start and end swap.
       curves.push({ id: sketchId("a"), type: "arc", center: copyOf(c.center), start: copyOf(c.end), end: copyOf(c.start), construction: c.construction });
@@ -1058,8 +1045,11 @@ export function addTangentArc(s: SketchData, startId: string, end: Placed, const
 // Sketch patterns
 
 export type SketchPatternOptions =
-  /** `count` copies in a row (including the original), `spacing` mm apart, heading `angle` degrees from the X direction. */
-  | { kind: "linear"; count: number; spacing: number; angle: number }
+  /**
+   * `count` copies in a row (including the original), `spacing` mm apart, heading `angle` degrees from the X direction —
+   * or along the line `lineId` (the other way if `reverse`), following it if it turns.
+   */
+  | { kind: "linear"; count: number; spacing: number; angle: number; lineId?: string; reverse?: boolean }
   /** `count` copies (including the original) spread over `angle` degrees around `centre` (360 = all the way round). */
   | { kind: "circular"; count: number; angle: number; centre: P2; centreId?: string };
 
@@ -1095,13 +1085,19 @@ export function patternCurves(s: SketchData, curveIds: string[], opts: SketchPat
   const curves: SketchCurve[] = [];
   const constraints: SketchConstraint[] = [];
   const centreId = opts.kind === "circular" && opts.centreId && isPointId(s, opts.centreId) ? opts.centreId : null;
+  const lineId = opts.kind === "linear" && opts.lineId && curveById(s, opts.lineId)?.type === "line" ? opts.lineId : null;
   for (let i = 1; i < count; i++) {
     const before = curves.length;
     const copies = copyCurvesWith(s, sources, patternTransform(opts, i), points, curves);
-    if (!centreId || opts.kind !== "circular") continue;
-    // Round a point of the sketch: each copy stays turned round it, so the copies follow when the centre or the originals move.
-    const turn = patternStep(opts) * i;
-    for (const [from, to] of copies) constraints.push(con("patternCopy", [to, from, centreId], undefined, [turn]));
+    if (opts.kind === "linear") {
+      // In a row: each copy stays the original moved along (along the line, if one was picked), so the copies follow when the originals or the line move.
+      const along = opts.spacing * i * (lineId && opts.reverse ? -1 : 1);
+      for (const [from, to] of copies) constraints.push(con("patternMove", lineId ? [to, from, lineId] : [to, from], undefined, [along, opts.angle]));
+    } else if (centreId) {
+      // Round a point of the sketch: each copy stays turned round it, so the copies follow when the centre or the originals move.
+      const turn = patternStep(opts) * i;
+      for (const [from, to] of copies) constraints.push(con("patternCopy", [to, from, centreId], undefined, [turn]));
+    } else continue;
     sources.forEach((c, k) => {
       const copy = curves[before + k];
       // The copy's size follows the original's (an equal marked as the pattern's, extra [1]).
@@ -1142,9 +1138,27 @@ function copyCurvesWith(s: SketchData, sources: SketchCurve[], move: (p: P2) => 
       else if (c.type === "spline") {
         const ids = c.points.map(copyOf);
         const tangents = movedHandles(s, c, ids, move);
-        curves.push({ id: sketchId("sp"), type: "spline", points: ids, closed: c.closed, construction: c.construction, ...(c.conic !== undefined ? { conic: c.conic } : {}), ...(tangents ? { tangents } : {}) });
+        const tangentsIn = movedHandles(s, c, ids, move, "tangentsIn");
+        curves.push({
+          id: sketchId("sp"),
+          type: "spline",
+          points: ids,
+          closed: c.closed,
+          construction: c.construction,
+          ...(c.conic !== undefined ? { conic: c.conic } : {}),
+          ...(tangents ? { tangents } : {}),
+          ...(tangentsIn ? { tangentsIn } : {}),
+        });
       } else if (c.type === "ellipse")
-        curves.push({ id: sketchId("el"), type: "ellipse", center: copyOf(c.center), major: copyOf(c.major), minor: copyOf(c.minor), construction: c.construction });
+        curves.push({
+          id: sketchId("el"),
+          type: "ellipse",
+          center: copyOf(c.center),
+          major: copyOf(c.major),
+          minor: copyOf(c.minor),
+          construction: c.construction,
+          ...(c.start && c.end ? { start: copyOf(c.start), end: copyOf(c.end) } : {}),
+        });
       else curves.push({ id: sketchId("a"), type: "arc", center: copyOf(c.center), start: copyOf(c.start), end: copyOf(c.end), construction: c.construction });
     }
     return copies;
@@ -1153,11 +1167,12 @@ function copyCurvesWith(s: SketchData, sources: SketchCurve[], move: (p: P2) => 
 
 
 /** A spline's handles carried along with a copy of it (moved, turned or mirrored the same way), keyed by the copied points' ids. */
-function movedHandles(s: SketchData, c: SketchSpline, newIds: string[], move: (p: P2) => P2): Record<string, P2> | undefined {
-  if (!c.tangents) return undefined;
+function movedHandles(s: SketchData, c: SketchSpline, newIds: string[], move: (p: P2) => P2, which: "tangents" | "tangentsIn" = "tangents"): Record<string, P2> | undefined {
+  const handles = c[which];
+  if (!handles) return undefined;
   const out: Record<string, P2> = {};
   c.points.forEach((id, i) => {
-    const t = c.tangents?.[id];
+    const t = handles[id];
     if (!t) return;
     const p = pointPos(s, id);
     const a = move(p);
@@ -1209,9 +1224,10 @@ export function transformCurves(s: SketchData, curveIds: string[], t: SketchTran
   });
   // Splines' handles turn with them.
   const curves = s.curves.map((c) => {
-    if (c.type !== "spline" || !c.tangents || !sources.includes(c)) return c;
+    if (c.type !== "spline" || !(c.tangents || c.tangentsIn) || !sources.includes(c)) return c;
     const tangents = movedHandles(s, c, c.points, move);
-    return tangents ? { ...c, tangents } : c;
+    const tangentsIn = movedHandles(s, c, c.points, move, "tangentsIn");
+    return { ...c, ...(tangents ? { tangents } : {}), ...(tangentsIn ? { tangentsIn } : {}) };
   });
   const r = settle({ ...s, points, curves });
   // Constraints (a fix, a dimension to something that stays) may hold them where they were.
@@ -1231,6 +1247,8 @@ export interface PatternSettings {
   patternSpacing: string;
   patternAngle: string;
   patternCentre: string;
+  /** Linear: the line the direction was taken from (used while the angle still runs along it). */
+  patternLine?: string;
 }
 
 /** Turn the typed pattern settings into numbers, or say what's wrong with them. */
@@ -1240,6 +1258,15 @@ export function readPatternSettings(s: SketchData, set: PatternSettings): Sketch
   if (set.patternKind === "linear") {
     const spacing = evaluate(set.patternSpacing);
     if (!spacing.ok) return `Spacing: ${spacing.error}`;
+    const line = set.patternLine ? curveById(s, set.patternLine) : undefined;
+    if (line?.type === "line") {
+      // Still along the picked line (or straight back along it)? Then the copies follow the line.
+      const [a, b] = [pointPos(s, line.p1), pointPos(s, line.p2)];
+      const lineAngle = (Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI;
+      const off = (((angle.value - lineAngle) % 360) + 360) % 360;
+      const near = (v: number) => Math.min(Math.abs(off - v), 360 - Math.abs(off - v)) < 0.01;
+      if (near(0) || near(180)) return { kind: "linear", count: set.patternCount, spacing: spacing.value, angle: angle.value, lineId: line.id, reverse: near(180) };
+    }
     return { kind: "linear", count: set.patternCount, spacing: spacing.value, angle: angle.value };
   }
   const known = set.patternCentre === ORIGIN_ID || s.points.some((p) => p.id === set.patternCentre);
@@ -1546,7 +1573,8 @@ export function splitAt(s: SketchData, curveId: string, at: { x: number; y: numb
   const line = curveById(s, curveId);
   if (line?.type === "arc") return splitArc(s, line, at);
   if (line?.type === "circle") return { sketch: s, lineIds: [], error: "A circle has no ends to split between — use Trim to cut a piece out of it, or draw an arc instead." };
-  if (line?.type !== "line") return { sketch: s, lineIds: [], error: "Click a line or arc where you want to split it." };
+  if (isWavy(line)) return splitWavy(s, line, at);
+  if (line?.type !== "line") return { sketch: s, lineIds: [], error: "Click a line, arc, spline or ellipse where you want to split it." };
   const A = pointPos(s, line.p1);
   const B = pointPos(s, line.p2);
   const d = sub(B, A);

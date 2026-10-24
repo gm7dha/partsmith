@@ -1,6 +1,7 @@
 /**
  * Where to draw dimension lines/labels and constraint badges, in sketch mm.
  */
+import { curveParam, nearestParam } from "./curves";
 import { angleRays, arcSweep, curveById, ellipsePoints, pointPos, radiusOf, splinePath } from "./ops";
 import { isDimension, type SketchArc, type SketchCircle, type SketchConstraint, type SketchData, type SketchLine } from "./types";
 
@@ -90,6 +91,14 @@ export function dimensionLayout(s: SketchData, c: SketchConstraint): DimensionLa
           }
           const p = add(centre, scale(dir, radiusOf(s, copy)));
           const q = add(centre, scale(dir, radiusOf(s, orig)));
+          return { lines: [[p, q]], label: add(mid(p, q), offset), anchor: mid(p, q) };
+        }
+        if (copy?.type === "spline" && (orig?.type === "spline" || orig?.type === "ellipse")) {
+          // From the middle of the copy across to the nearest place on the original.
+          const path = curveParam(s, copy);
+          const p = path.at((path.lo + path.hi) / 2);
+          const o = curveParam(s, orig);
+          const q = o.at(nearestParam(o, p));
           return { lines: [[p, q]], label: add(mid(p, q), offset), anchor: mid(p, q) };
         }
         return null;
@@ -215,6 +224,8 @@ export const RELATION_SYMBOLS: Partial<Record<SketchConstraint["type"], string>>
   concentric: "◎",
   midpoint: "M",
   symmetric: "⇆",
+  normal: "N",
+  curvature: "G2",
   pointOnLine: "●",
   pointOnCircle: "●",
   pointOnCurve: "●",
@@ -254,6 +265,6 @@ export function badgeAnchors(s: SketchData, c: SketchConstraint): Pt[] {
     return add(centre, [r * Math.cos(am), r * Math.sin(am)]);
   };
   // Relations between two things get a badge on each, like Onshape.
-  const refs = c.type === "horizontal" || c.type === "vertical" || c.type === "fix" ? c.refs.slice(0, 1) : c.type === "coincident" || c.type === "pointOnLine" || c.type === "pointOnCircle" || c.type === "pointOnCurve" || c.type === "midpoint" ? c.refs.slice(0, 1) : c.type === "symmetric" ? c.refs.slice(0, 2) : c.refs;
+  const refs = c.type === "horizontal" || c.type === "vertical" || c.type === "fix" ? c.refs.slice(0, 1) : c.type === "coincident" || c.type === "pointOnLine" || c.type === "pointOnCircle" || c.type === "pointOnCurve" || c.type === "midpoint" ? c.refs.slice(0, 1) : c.type === "symmetric" || c.type === "curvature" ? c.refs.slice(0, 2) : c.refs;
   return refs.map(at).filter((p): p is Pt => p !== null);
 }

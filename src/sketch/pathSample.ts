@@ -59,12 +59,18 @@ export function sampleSegments(segments: Segment[]): [number, number][] {
     } else {
       const c = Math.cos(sg.angle);
       const sn = Math.sin(sg.angle);
-      for (let i = 0; i <= 180; i++) {
-        const t = (i * Math.PI) / 90;
+      const at = (t: number): [number, number] => {
         const x = sg.rx * Math.cos(t);
         const y = sg.ry * Math.sin(t);
-        push([sg.center[0] + x * c - y * sn, sg.center[1] + x * sn + y * c]);
-      }
+        return [sg.center[0] + x * c - y * sn, sg.center[1] + x * sn + y * c];
+      };
+      if (sg.kind === "ellipseArc") {
+        // Part of an ellipse, from its `from` end to its `to` end (whichever way round that is).
+        const p0 = at(sg.t0);
+        const forward = Math.hypot(p0[0] - sg.from[0], p0[1] - sg.from[1]) <= Math.hypot(p0[0] - sg.to[0], p0[1] - sg.to[1]);
+        const n = Math.max(8, Math.ceil((sg.t1 - sg.t0) / (Math.PI / 90)));
+        for (let i = 0; i <= n; i++) push(at(forward ? sg.t0 + ((sg.t1 - sg.t0) * i) / n : sg.t1 - ((sg.t1 - sg.t0) * i) / n));
+      } else for (let i = 0; i <= 180; i++) push(at((i * Math.PI) / 90));
     }
   }
   return pts;

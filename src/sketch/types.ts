@@ -83,9 +83,27 @@ export interface SketchSpline {
    * their own.
    */
   tangents?: Record<string, [number, number]>;
+  /**
+   * Where the curve arrives at a point at a different speed or direction than
+   * it leaves (left by Split and Trim, so the pieces keep the exact shape):
+   * the arriving tangent for that point's id. Others arrive as they leave.
+   */
+  tangentsIn?: Record<string, [number, number]>;
+  /**
+   * An offset copy of a spline or ellipse: for each of its points, where
+   * along the original it sits (the original's own measure). The offset
+   * dimension holds each point that far from the original there, and the
+   * handles are worked out again whenever the original changes.
+   */
+  offsetParams?: number[];
 }
 
-/** An ellipse: its centre and the ends of its two axes (kept square to each other). */
+/**
+ * An ellipse: its centre and the ends of its two axes (kept square to each
+ * other). With `start` and `end` it's only part of one (an elliptical arc, as
+ * Trim and Split leave), running anticlockwise from start to end; both are
+ * held on the ellipse.
+ */
 export interface SketchEllipse {
   id: string;
   type: "ellipse";
@@ -93,6 +111,8 @@ export interface SketchEllipse {
   major: string;
   minor: string;
   construction: boolean;
+  start?: string;
+  end?: string;
 }
 
 export type SketchCurve = SketchLine | SketchCircle | SketchArc | SketchSpline | SketchEllipse;
@@ -119,7 +139,24 @@ export type RelationType =
    * The copy stays the original turned that far round the centre, so the
    * pattern follows when either moves.
    */
-  | "patternCopy";
+  | "patternCopy"
+  /**
+   * A linear pattern's copy of a point: refs [copy, original] or [copy, original, line];
+   * extra [distance, degrees]. The copy stays the original moved that far — along the
+   * line when there is one (negative: the other way), else at that angle from X.
+   */
+  | "patternMove"
+  /**
+   * A line at right angles to a curve where they meet (Onshape's Normal):
+   * refs [line, curve]; extra [end] — 0 when the line's first end is the one at the curve, 1 its second.
+   * For a circle or arc, the line (carried on) goes through the centre.
+   */
+  | "normal"
+  /**
+   * Curvature continuous (G2) where a spline ends on a line, arc or spline:
+   * refs [spline, other, joint point]. They meet smoothly and bend the same amount there.
+   */
+  | "curvature";
 
 /** Dimensions (have a value the user types). */
 export type DimensionType =

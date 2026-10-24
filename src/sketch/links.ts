@@ -383,4 +383,4 @@ export function pruneReferences(s: SketchData): SketchData {
 }
 
 const curvePointsOf = (c: SketchCurve): string[] =>
-  c.type === "line" ? [c.p1, c.p2] : c.type === "circle" ? [c.center] : c.type === "spline" ? c.points : c.type === "ellipse" ? [c.center, c.major, c.minor] : [c.center, c.start, c.end];
+  c.type === "line" ? [c.p1, c.p2] : c.type === "circle" ? [c.center] : c.type === "spline" ? c.points : c.type === "ellipse" ? [c.center, c.major, c.minor, ...(c.start && c.end ? [c.start, c.end] : [])] : [c.center, c.start, c.end];

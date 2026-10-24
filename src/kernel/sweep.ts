@@ -18,6 +18,7 @@ function reversed(segments: Segment[]): Segment[] {
     if (sg.kind === "line") return { kind: "line", from: sg.to, to: sg.from };
     if (sg.kind === "arc") return { kind: "arc", from: sg.to, mid: sg.mid, to: sg.from };
     if (sg.kind === "bezier") return { kind: "bezier", from: sg.to, c1: sg.c2, c2: sg.c1, to: sg.from };
+    if (sg.kind === "ellipseArc") return { ...sg, from: sg.to, to: sg.from };
     return sg;
   });
 }

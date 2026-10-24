@@ -19,6 +19,9 @@ const RELATIONS = new Set<string>([
   "pointOnCurve",
   "fix",
   "patternCopy",
+  "patternMove",
+  "normal",
+  "curvature",
 ]);
 
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -71,9 +74,20 @@ export function parseSketchData(raw: unknown): SketchData | null {
         construction,
         ...(typeof c.conic === "number" && c.conic > 0 && c.conic < 1 && c.points.length === 3 ? { conic: c.conic } : {}),
         ...splineHandlesOf(c.tangents, c.points as string[]),
+        ...splineHandlesOf(c.tangentsIn, c.points as string[], "tangentsIn"),
+        ...(Array.isArray(c.offsetParams) && c.offsetParams.length === c.points.length && c.offsetParams.every(num) ? { offsetParams: c.offsetParams as number[] } : {}),
       });
     else if (c.type === "ellipse" && str(c.center) && str(c.major) && str(c.minor))
-      curves.push({ id: c.id, type: "ellipse", center: c.center, major: c.major, minor: c.minor, construction });
+      curves.push({
+        id: c.id,
+        type: "ellipse",
+        center: c.center,
+        major: c.major,
+        minor: c.minor,
+        construction,
+        // Part of an ellipse: both ends, or it's the whole ellipse.
+        ...(str(c.start) && str(c.end) ? { start: c.start, end: c.end } : {}),
+      });
     else return null;
   }
   const constraints: SketchConstraint[] = [];
@@ -144,11 +158,11 @@ function parseFacePick(raw: unknown): { face: NonNullable<Extract<SketchPlane, {
 }
 
 /** A spline's saved handles, keeping only those for its own points and with two finite numbers. */
-function splineHandlesOf(raw: unknown, points: string[]): { tangents?: Record<string, [number, number]> } {
+function splineHandlesOf(raw: unknown, points: string[], key: "tangents" | "tangentsIn" = "tangents"): { tangents?: Record<string, [number, number]>; tangentsIn?: Record<string, [number, number]> } {
   if (!raw || typeof raw !== "object") return {};
   const out: Record<string, [number, number]> = {};
   for (const [id, t] of Object.entries(raw as Record<string, unknown>)) {
     if (points.includes(id) && Array.isArray(t) && t.length === 2 && t.every((v) => typeof v === "number" && Number.isFinite(v))) out[id] = [t[0], t[1]];
   }
-  return Object.keys(out).length ? { tangents: out } : {};
+  return Object.keys(out).length ? { [key]: out } : {};
 }

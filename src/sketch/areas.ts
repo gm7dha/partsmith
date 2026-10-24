@@ -18,7 +18,8 @@
  */
 import { bezierAt, splineBeziers } from "./spline";
 import { ellipseAt, ellipseFrom, type EllipseGeom } from "./ellipse";
-import { splineHandles } from "./ops";
+import { splineHandles, splineHandlesIn } from "./ops";
+import { ellipseSpan } from "./curves";
 import { findRegions, pointInPolygon, type Loop, type Pt, type Region, type RegionResult, type Segment } from "./regions";
 import { ORIGIN_ID, type SketchData } from "./types";
 import { textContours, textPieceId, textsOf } from "./sketchText";
@@ -30,11 +31,11 @@ type Prim =
   | { kind: "line"; a: Pt; b: Pt }
   /** Anticlockwise from angle a0 to a1 (a whole circle: a1 = a0 + 2π, closed). */
   | { kind: "arc"; c: Pt; r: number; a0: number; a1: number; closed: boolean }
-  /** A whole ellipse (always closed), u = t / 2π. */
-  | { kind: "ellipse"; g: EllipseGeom }
+  /** An ellipse from its own angle t0 to t1 (a whole one: 0 to 2π, closed); u = (t − t0) / (t1 − t0). */
+  | { kind: "ellipse"; g: EllipseGeom; t0: number; t1: number; closed: boolean }
   | { kind: "bez"; p: Bez };
 
-const isClosed = (p: Prim) => (p.kind === "arc" && p.closed) || p.kind === "ellipse";
+const isClosed = (p: Prim) => (p.kind === "arc" || p.kind === "ellipse") && p.closed;
 
 function at(p: Prim, u: number): Pt {
   switch (p.kind) {
@@ -45,7 +46,7 @@ function at(p: Prim, u: number): Pt {
       return [p.c[0] + p.r * Math.cos(a), p.c[1] + p.r * Math.sin(a)];
     }
     case "ellipse":
-      return ellipseAt(p.g, 2 * Math.PI * u);
+      return ellipseAt(p.g, p.t0 + (p.t1 - p.t0) * u);
     case "bez":
       return bezierAt(p.p, u);
   }
@@ -65,8 +66,8 @@ function derivs(p: Prim, u: number): [Pt, Pt] {
       ];
     }
     case "ellipse": {
-      const k = 2 * Math.PI;
-      const t = k * u;
+      const k = p.t1 - p.t0;
+      const t = p.t0 + k * u;
       const c = Math.cos(p.g.angle), s = Math.sin(p.g.angle);
       const dx = -p.g.rx * Math.sin(t) * k, dy = p.g.ry * Math.cos(t) * k;
       const ddx = -p.g.rx * Math.cos(t) * k * k, ddy = -p.g.ry * Math.sin(t) * k * k;
@@ -99,7 +100,7 @@ function stepsOf(p: Prim): number {
     case "arc":
       return Math.max(4, Math.ceil(Math.abs(p.a1 - p.a0) / (Math.PI / 36)));
     case "ellipse":
-      return 72;
+      return Math.max(8, Math.ceil((72 * (p.t1 - p.t0)) / (2 * Math.PI)));
     case "bez":
       return 16;
   }
@@ -126,10 +127,10 @@ function pieceSegment(p: Prim, u0: number, u1: number, from: Pt, to: Pt): Segmen
       return [{ kind: "arc", from, mid: at(p, (u0 + u1) / 2), to }];
     }
     case "ellipse": {
-      const t0 = 2 * Math.PI * u0;
-      const t1 = 2 * Math.PI * u1;
+      const t0 = p.t0 + (p.t1 - p.t0) * u0;
+      const t1 = p.t0 + (p.t1 - p.t0) * u1;
       const g = p.g;
-      if (u1 - u0 > 0.999999) {
+      if (u1 - u0 > 0.999999 && p.closed) {
         const tm = (t0 + t1) / 2;
         const half = ellipseAt(g, tm);
         return [
@@ -215,7 +216,12 @@ function primitives(sketch: SketchData): { prims: Prim[]; ids: string[] } {
         const ctr = pts.get(c.center), mj = pts.get(c.major), mn = pts.get(c.minor);
         if (!ctr || !mj || !mn) break;
         const g = ellipseFrom(ctr, mj, mn);
-        if (g.rx > 1e-9 && g.ry > 1e-9) out.push({ kind: "ellipse", g });
+        if (!(g.rx > 1e-9 && g.ry > 1e-9)) break;
+        if (c.start && c.end) {
+          // Part of an ellipse: anticlockwise from its start to its end.
+          const span = ellipseSpan(sketch, c);
+          out.push({ kind: "ellipse", g, t0: span.t0, t1: span.t1, closed: false });
+        } else out.push({ kind: "ellipse", g, t0: 0, t1: 2 * Math.PI, closed: true });
         break;
       }
       case "spline": {
@@ -223,7 +229,7 @@ function primitives(sketch: SketchData): { prims: Prim[]; ids: string[] } {
         const ps = c.points.map((id) => pts.get(id));
         if (ps.some((p) => !p)) break;
         const hs = splineHandles(c);
-        for (const p of splineBeziers(ps as Pt[], c.closed, c.closed ? undefined : c.conic, hs)) out.push({ kind: "bez", p });
+        for (const p of splineBeziers(ps as Pt[], c.closed, c.closed ? undefined : c.conic, hs, splineHandlesIn(c))) out.push({ kind: "bez", p });
         break;
       }
     }

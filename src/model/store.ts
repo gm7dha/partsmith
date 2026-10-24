@@ -165,6 +165,8 @@ export interface SketchSession {
   patternCentre: string;
   /** Linear pattern: the next click on a line sets the direction. */
   patternDirectionPick?: boolean;
+  /** Linear pattern: the line the direction came from, so the copies follow it. */
+  patternLine?: string;
   /** Move / copy tool: how far across and up (as typed), the turn (degrees, about the selection's middle), and whether to copy. */
   moveDx: string;
   moveDy: string;
@@ -302,7 +304,7 @@ export interface AppState {
   keepOfferedDimension: (id: string) => void;
   /** Drop any offered dimensions not kept yet. */
   discardOfferedDimensions: () => void;
-  setSketchOptions: (patch: Partial<Pick<SketchSession, "polygonSides" | "polygonAcross" | "conicRho" | "filletRadius" | "offsetDistance" | "patternKind" | "patternCount" | "patternSpacing" | "patternAngle" | "patternCentre" | "patternDirectionPick" | "moveDx" | "moveDy" | "moveAngle" | "moveCopy" | "textValue" | "textSize" | "textAngle" | "textFont" | "textAnchorAt" | "textFocus" | "intersectWhole" | "dxfOpen" | "dxfScale">>) => void;
+  setSketchOptions: (patch: Partial<Pick<SketchSession, "polygonSides" | "polygonAcross" | "conicRho" | "filletRadius" | "offsetDistance" | "patternKind" | "patternCount" | "patternSpacing" | "patternAngle" | "patternCentre" | "patternDirectionPick" | "patternLine" | "moveDx" | "moveDy" | "moveAngle" | "moveCopy" | "textValue" | "textSize" | "textAngle" | "textFont" | "textAnchorAt" | "textFocus" | "intersectWhole" | "dxfOpen" | "dxfScale">>) => void;
   commitDraft: () => boolean;
   cancelDraft: () => void;
   /**

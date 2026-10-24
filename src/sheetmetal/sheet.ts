@@ -321,6 +321,8 @@ export function reverseSegments(segments: Segment[]): Segment[] {
         return { kind: "arc", from: s.to, mid: s.mid, to: s.from };
       case "bezier":
         return { kind: "bezier", from: s.to, c1: s.c2, c2: s.c1, to: s.from };
+      case "ellipseArc":
+        return { ...s, from: s.to, to: s.from };
       default:
         return s;
     }

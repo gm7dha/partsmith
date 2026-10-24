@@ -22,7 +22,8 @@ import {
   dragCurve,
   dragPoint,
   pointPos,
-  splineHandles,
+  ellipsePoints,
+  splinePath,
   pointsSharingCurve,
   radiusOf,
   setSplineHandle,
@@ -291,8 +292,13 @@ export class SketchController {
       }
       const [a, b] = [pointPos(s, line.p1), pointPos(s, line.p2)];
       const angle = Math.round(((Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI) * 100) / 100;
-      st.setSketchOptions({ patternAngle: String(Object.is(angle, -0) ? 0 : angle), patternDirectionPick: false });
-      st.setSketchMessage(`Direction set along that line (${angle}°). Type 180 more to go the other way.`, "info");
+      // A line of the sketch itself: the copies follow it if it turns (a part's edge just sets the angle).
+      const lineId = over && !isRefId(over.id) ? line.id : undefined;
+      st.setSketchOptions({ patternAngle: String(Object.is(angle, -0) ? 0 : angle), patternDirectionPick: false, patternLine: lineId });
+      st.setSketchMessage(
+        `Direction set along that line (${angle}°)${lineId ? " — the copies will follow the line if it turns" : ""}. Type 180 more to go the other way.`,
+        "info",
+      );
       this.emit({ preview: this.patternPreview() });
       return;
     }
@@ -340,7 +346,8 @@ export class SketchController {
         if (c.type === "line") out.push({ kind: "line", a: at(c.p1), b: at(c.p2) });
         else if (c.type === "circle") out.push({ kind: "circle", c: at(c.center), r: c.radius });
         else if (c.type === "spline" || c.type === "ellipse") {
-          const pts = c.type === "spline" ? splinePolyline(c.points.map(at), c.closed, undefined, c.conic, splineHandles(c)) : ellipsePolyline(ellipseFrom(at(c.center), at(c.major), at(c.minor)));
+          // Moving is rigid, so the curve drawn out moves point by point.
+          const pts = (c.type === "spline" ? splinePath(d, c) : ellipsePoints(d, c)).map(move);
           for (let k = 0; k + 1 < pts.length; k++) out.push({ kind: "line", a: pts[k], b: pts[k + 1] });
         } else {
           const cc = at(c.center);
@@ -410,7 +417,7 @@ export class SketchController {
     if (tool === "extend" || tool === "split") {
       const hit = this.hitAt(e);
       if (hit?.kind !== "curve") {
-        this.state.setSketchMessage(tool === "extend" ? "Click near the end of a line or arc you want to lengthen." : "Click a line or arc where you want to split it.", "info");
+        this.state.setSketchMessage(tool === "extend" ? "Click near the end of a line or arc you want to lengthen." : "Click a line, arc, spline or part of an ellipse where you want to split it.", "info");
         return;
       }
       this.commit(tool === "extend" ? extendAt(d, hit.id, { x: e.x, y: e.y }) : splitAt(d, hit.id, { x: e.x, y: e.y }), []);
@@ -420,7 +427,7 @@ export class SketchController {
     if (tool === "trim") {
       const hit = this.hitAt(e);
       if (hit?.kind !== "curve") {
-        this.state.setSketchMessage("Click the part of a line, arc or circle you want to cut away.", "info");
+        this.state.setSketchMessage("Click the part of a line, arc, circle, spline or ellipse you want to cut away.", "info");
         return;
       }
       this.commit(trimAt(d, hit.id, { x: e.x, y: e.y }), []);
@@ -430,7 +437,7 @@ export class SketchController {
     if (tool === "offset") {
       const hit = this.hitAt(e);
       if (hit?.kind !== "curve") {
-        this.state.setSketchMessage("Click a line, arc or circle — on the side you want the copy.", "info");
+        this.state.setSketchMessage("Click a line, arc, circle, spline or ellipse — on the side you want the copy.", "info");
         return;
       }
       const r = offsetCurves(d, hit.id, { x: e.x, y: e.y }, this.state.sketch?.offsetDistance ?? "2");

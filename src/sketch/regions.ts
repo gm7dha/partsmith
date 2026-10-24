@@ -10,9 +10,11 @@
  * feature stores the areas the user clicked: see `areas.ts`.
  */
 import { ellipseFrom, ellipsePolyline } from "./ellipse";
-import { splineBeziers, splinePolyline } from "./spline";
+import { reversedHandles, splineBeziers, splinePolyline } from "./spline";
 import { ORIGIN_ID, type SketchCurve, type SketchData } from "./types";
-import { splineHandles } from "./ops";
+import { splineHandles, splineHandlesIn } from "./ops";
+import { ellipseSpan } from "./curves";
+import { ellipseAt } from "./ellipse";
 import { textContours, textsOf } from "./sketchText";
 
 export type Pt = [number, number];
@@ -164,7 +166,7 @@ function sketchGraph(sketch: SketchData) {
 
   // So are ellipses.
   for (const c of solid) {
-    if (c.type !== "ellipse") continue;
+    if (c.type !== "ellipse" || (c.start && c.end)) continue;
     const g = ellipseFrom(pts.get(c.center)!, pts.get(c.major)!, pts.get(c.minor)!);
     if (g.rx <= 1e-9 || g.ry <= 1e-9) continue;
     loops.push(makeLoop([{ kind: "ellipse", center: g.centre, rx: g.rx, ry: g.ry, angle: g.angle }], ellipsePolyline(g).slice(0, -1)));
@@ -175,8 +177,9 @@ function sketchGraph(sketch: SketchData) {
     if (c.type !== "spline" || !c.closed || c.points.length < 3) continue;
     const ps = c.points.map((id) => pts.get(id)!);
     const hs = splineHandles(c);
-    const segs: Segment[] = splineBeziers(ps, true, undefined, hs).map(([from, c1, c2, to]) => ({ kind: "bezier", from, c1, c2, to }));
-    loops.push(makeLoop(segs, splinePolyline(ps, true, undefined, undefined, hs)));
+    const hi = splineHandlesIn(c);
+    const segs: Segment[] = splineBeziers(ps, true, undefined, hs, hi).map(([from, c1, c2, to]) => ({ kind: "bezier", from, c1, c2, to }));
+    loops.push(makeLoop(segs, splinePolyline(ps, true, undefined, undefined, hs, hi)));
   }
 
   // Each letter outline of a text is a loop too (holes such as the inside of an "o" nest as usual).
@@ -192,8 +195,8 @@ function sketchGraph(sketch: SketchData) {
   // Join lines, arcs and open splines at shared end points (merged by position, so separate
   // but coincident points count as joined).
   const ends = solid.filter(
-    (c): c is Exclude<SketchCurve, { type: "circle" | "ellipse" }> =>
-      c.type !== "circle" && c.type !== "ellipse" && !(c.type === "spline" && (c.closed || c.points.length < 2)),
+    (c): c is Exclude<SketchCurve, { type: "circle" }> =>
+      c.type !== "circle" && !(c.type === "ellipse" && !(c.start && c.end)) && !(c.type === "spline" && (c.closed || c.points.length < 2)),
   );
   const keyOf = (p: Pt) => `${Math.round(p[0] * 1e5)},${Math.round(p[1] * 1e5)}`;
   const nodeOf = new Map<string, number>();
@@ -220,7 +223,7 @@ function sketchGraph(sketch: SketchData) {
         ? [pts.get(c.p1)!, pts.get(c.p2)!]
         : c.type === "spline"
           ? [pts.get(c.points[0])!, pts.get(c.points[c.points.length - 1])!]
-          : [pts.get(c.start)!, pts.get(c.end)!];
+          : [pts.get(c.start!)!, pts.get(c.end!)!];
     const a = node(p);
     const b = node(q);
     if (a === b) continue; // zero-length
@@ -247,10 +250,16 @@ function sketchGraph(sketch: SketchData) {
       // Its pieces, the other way round when walking it backwards.
       const ps = e.curve.points.map((id) => pts.get(id)!);
       // Walked backwards, each handle points the other way too.
-      const hs = splineHandles(e.curve).map((h) => (h && !forward ? ([-h[0], -h[1]] as [number, number]) : h));
-      const pieces = splineBeziers(forward ? ps : [...ps].reverse(), false, e.curve.conic, forward ? hs : [...hs].reverse());
+      const h = forward ? { tangents: splineHandles(e.curve), tangentsIn: splineHandlesIn(e.curve) } : reversedHandles(splineHandles(e.curve), splineHandlesIn(e.curve));
+      const pieces = splineBeziers(forward ? ps : [...ps].reverse(), false, e.curve.conic, h.tangents, h.tangentsIn);
       for (const [f, c1, c2, t] of pieces) segments.push({ kind: "bezier", from: f, c1, c2, to: t });
-      polygon.push(...splinePolyline(forward ? ps : [...ps].reverse(), false, undefined, e.curve.conic, forward ? hs : [...hs].reverse()).slice(0, -1));
+      polygon.push(...splinePolyline(forward ? ps : [...ps].reverse(), false, undefined, e.curve.conic, h.tangents, h.tangentsIn).slice(0, -1));
+    } else if (e.curve.type === "ellipse") {
+      // Part of an ellipse, anticlockwise from its start to its end (walked either way).
+      const { g, t0, t1 } = ellipseSpan(sketch, e.curve);
+      segments.push({ kind: "ellipseArc", center: g.centre, rx: g.rx, ry: g.ry, angle: g.angle, t0, t1, from, to });
+      const n = Math.max(8, Math.ceil((t1 - t0) / (Math.PI / 36)));
+      for (let i = 0; i < n; i++) polygon.push(ellipseAt(g, forward ? t0 + ((t1 - t0) * i) / n : t1 - ((t1 - t0) * i) / n));
     } else {
       const center = pts.get(e.curve.center)!;
       const s = pts.get(e.curve.start)!;

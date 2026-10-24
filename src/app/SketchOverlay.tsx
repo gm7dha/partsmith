@@ -24,6 +24,9 @@ const RELATION_NAMES: Partial<Record<SketchConstraint["type"], string>> = {
   pointOnCurve: "Point on curve",
   fix: "Fixed",
   patternCopy: "Pattern copy",
+  patternMove: "Pattern copy",
+  normal: "Normal",
+  curvature: "Curvature",
 };
 
 /** Text shown on a dimension label. A reference (driven) dimension shows the size as it is now, in brackets. */
@@ -154,7 +157,7 @@ function computePlacements(data: SketchData) {
       continue;
     }
     if (c.type === "coincident" || c.type === "pointOnLine" || c.type === "pointOnCircle" || c.type === "pointOnCurve") continue; // too cluttered; shown as joined points
-    if (c.type === "patternCopy" || (c.type === "fix" && linked.has(c.refs[0]))) continue;
+    if (c.type === "patternCopy" || c.type === "patternMove" || (c.type === "fix" && linked.has(c.refs[0]))) continue;
     badgeAnchors(data, c).forEach((at, i) => {
       const key = `${Math.round(at[0] * 100)},${Math.round(at[1] * 100)}`;
       const n = spots.get(key) ?? 0;

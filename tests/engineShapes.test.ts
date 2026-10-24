@@ -8,7 +8,7 @@ import { analyzeMesh } from "../src/geometry/meshCheck";
 import { GeometryEngine } from "../src/kernel/engine";
 import type { Feature } from "../src/model/types";
 import { addArc, addCircle, addLine, addRectangle } from "../src/sketch/ops";
-import { addEllipse, addSpline } from "../src/sketch/tools";
+import { addEllipse, addSpline, offsetCurves, splitAt, trimAt } from "../src/sketch/tools";
 import { planeOnFace } from "../src/sketch/planes";
 import { emptySketch } from "../src/sketch/types";
 import { loadOpenCascade, feature, sketchFeature, extrudeFeature, relativeError, rectSketch, lineSketch, meshOf } from "./support/engineHelpers";
@@ -189,6 +189,51 @@ describe("splines and ellipses", () => {
     const r2 = build([sk2, extrudeFeature(sk2.id, 2)]);
     expect(r2.featureErrors).toEqual({});
     expect(engine.check("normal").parts[0].exactVolume!).toBeCloseTo(Math.PI * 4 * 10 * 2, 1);
+  });
+
+  it("extrudes shapes made by trimming, splitting and offsetting splines and ellipses", () => {
+    // Half an ellipse: trim off its lower half with a line through the middle, then the line's ends outside it.
+    const el = addEllipse(emptySketch(), { x: 0, y: 0 }, { x: 20, y: 0 }, [0, 10]);
+    const ln = addLine(el.sketch, { x: -30, y: 0 }, { x: 30, y: 0 });
+    let half = trimAt(ln.sketch, el.ellipseId, { x: 0, y: -10 }).sketch;
+    half = trimAt(half, ln.lineId, { x: -25, y: 0 }).sketch;
+    half = trimAt(half, ln.lineId, { x: 25, y: 0 }).sketch;
+    const sk = sketchFeature({ kind: "default", name: "Top" }, half);
+    const r = build([sk, extrudeFeature(sk.id, 5)]);
+    expect(r.featureErrors).toEqual({});
+    expect(meshOf(r).watertight).toBe(true);
+    expect(relativeError(engine.check("normal").parts[0].exactVolume!, (Math.PI * 20 * 10 * 5) / 2)).toBeLessThan(1e-9);
+
+    // An arch closed by a line; split the arch in two (its pieces arrive and leave at different speeds): the same solid.
+    const base = addLine(emptySketch(), { x: 0, y: 0 }, { x: 40, y: 0 });
+    const line = base.sketch.curves[0] as { p1: string; p2: string };
+    const arch = addSpline(base.sketch, [{ x: 40, y: 0, snap: { kind: "point", id: line.p2 } }, { x: 30, y: 12 }, { x: 12, y: 9 }, { x: 0, y: 0, snap: { kind: "point", id: line.p1 } }], false);
+    const whole = sketchFeature({ kind: "default", name: "Top" }, arch.sketch);
+    build([whole, extrudeFeature(whole.id, 4)]);
+    const v0 = engine.check("normal").parts[0].exactVolume!;
+    const split = splitAt(arch.sketch, arch.splineId, { x: 21, y: 11 });
+    expect(split.error).toBeUndefined();
+    expect(split.sketch.curves.some((c) => c.type === "spline" && c.tangentsIn)).toBe(true);
+    const sk2 = sketchFeature({ kind: "default", name: "Top" }, split.sketch);
+    const r2 = build([sk2, extrudeFeature(sk2.id, 4)]);
+    expect(r2.featureErrors).toEqual({});
+    expect(relativeError(engine.check("normal").parts[0].exactVolume!, v0)).toBeLessThan(1e-9);
+
+    // An ellipse offset outwards by 3: its area grows by perimeter × 3 + π·3².
+    const e2 = addEllipse(emptySketch(), { x: 0, y: 0 }, { x: 20, y: 0 }, [0, 10]);
+    const off = offsetCurves(e2.sketch, e2.ellipseId, { x: 0, y: 14 }, "3");
+    expect(off.error).toBeUndefined();
+    const onlyCopy = { ...off.sketch, curves: off.sketch.curves.filter((c) => c.id !== e2.ellipseId), constraints: [] };
+    const sk3 = sketchFeature({ kind: "default", name: "Top" }, onlyCopy);
+    const r3 = build([sk3, extrudeFeature(sk3.id, 2)]);
+    expect(r3.featureErrors).toEqual({});
+    let perimeter = 0;
+    for (let i = 0; i < 100000; i++) {
+      const t = ((i + 0.5) / 100000) * 2 * Math.PI;
+      perimeter += Math.hypot(20 * Math.sin(t), 10 * Math.cos(t)) * ((2 * Math.PI) / 100000);
+    }
+    const area = Math.PI * 20 * 10 + perimeter * 3 + Math.PI * 9;
+    expect(relativeError(engine.check("normal").parts[0].exactVolume!, area * 2)).toBeLessThan(1e-4);
   });
 
   it("extrudes a closed spline", () => {

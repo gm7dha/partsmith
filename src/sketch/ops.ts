@@ -5,8 +5,9 @@
  * the caller keeps the old sketch.
  */
 import { evaluate } from "../model/expr";
-import { ellipseFrom, ellipsePolyline, type EllipseGeom } from "./ellipse";
+import { ellipseAt as ellipseAtParam, ellipseFrom, ellipsePolyline, type EllipseGeom } from "./ellipse";
 import { splinePolyline, splineTangents } from "./spline";
+import { curveParam, ellipseSpan, nearestParam } from "./curves";
 import { startingLength } from "../model/units";
 import { analyzeSketch, solveSketch } from "./solver";
 import { linkEdge, type RefEdge } from "./links";
@@ -104,7 +105,7 @@ export function curvePoints(c: SketchCurve): string[] {
       : c.type === "spline"
         ? [...c.points]
         : c.type === "ellipse"
-          ? [c.center, c.major, c.minor]
+          ? [c.center, c.major, c.minor, ...(c.start && c.end ? [c.start, c.end] : [])]
           : [c.center, c.start, c.end];
 }
 
@@ -153,6 +154,13 @@ export function measure(s: SketchData, c: SketchConstraint): number {
       const orig = curveById(s, b);
       if (copy?.type === "line" && orig?.type === "line") return measure(s, { id: "", type: "pointLineDistance", refs: [copy.p1, orig.id] });
       if ((copy?.type === "arc" || copy?.type === "circle") && (orig?.type === "arc" || orig?.type === "circle")) return Math.abs(radiusOf(s, copy) - radiusOf(s, orig));
+      if (copy?.type === "spline" && (orig?.type === "spline" || orig?.type === "ellipse")) {
+        // From the copy's first point to the nearest place on the original.
+        const q = pointPos(s, copy.points[0]);
+        const path = curveParam(s, orig);
+        const f = path.at(nearestParam(path, q));
+        return Math.hypot(q[0] - f[0], q[1] - f[1]);
+      }
       return 0;
     }
     case "arcLength": {
@@ -530,10 +538,24 @@ export function deleteItems(s: SketchData, ids: string[]): SketchData {
       if (c.conic !== undefined) return [];
       const points = c.points.filter((id) => !gone.has(id));
       if (points.length < 2) return [];
-      const tangents = c.tangents ? Object.fromEntries(Object.entries(c.tangents).filter(([id]) => !gone.has(id))) : undefined;
-      const { tangents: _old, ...rest } = c;
+      const keep = (h?: Record<string, [number, number]>) => (h ? Object.fromEntries(Object.entries(h).filter(([id]) => !gone.has(id))) : undefined);
+      const tangents = keep(c.tangents);
+      const tangentsIn = keep(c.tangentsIn);
+      const offsetParams = c.offsetParams?.filter((_, i) => !gone.has(c.points[i]));
+      const { tangents: _old, tangentsIn: _oldIn, offsetParams: _oldParams, ...rest } = c;
       void _old;
-      return [{ ...rest, points, closed: c.closed && points.length >= 3, ...(tangents && Object.keys(tangents).length ? { tangents } : {}) }];
+      void _oldIn;
+      void _oldParams;
+      return [
+        {
+          ...rest,
+          points,
+          closed: c.closed && points.length >= 3,
+          ...(tangents && Object.keys(tangents).length ? { tangents } : {}),
+          ...(tangentsIn && Object.keys(tangentsIn).length ? { tangentsIn } : {}),
+          ...(offsetParams && offsetParams.length === points.length ? { offsetParams } : {}),
+        },
+      ];
     }
     return curvePoints(c).some((id) => gone.has(id)) ? [] : [c];
   });
@@ -555,6 +577,14 @@ export function deleteItems(s: SketchData, ids: string[]): SketchData {
       if (!refs.length) return [];
       if (refs.length === c.refs.length) return [c];
       return [{ ...c, refs, ...(c.extra ? { extra } : {}) }];
+    }
+    if (c.type === "patternMove" && c.refs.length === 3 && !alive.has(c.refs[2]) && alive.has(c.refs[0]) && alive.has(c.refs[1])) {
+      // The row's direction line is gone: the copies carry on the way it pointed, at a set angle.
+      const line = s.curves.find((k) => k.id === c.refs[2]);
+      if (line?.type !== "line") return [];
+      const [a, b] = [pointPos(s, line.p1), pointPos(s, line.p2)];
+      const angle = (Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI;
+      return [{ ...c, refs: c.refs.slice(0, 2), extra: [c.extra?.[0] ?? 0, angle] }];
     }
     return c.refs.every((r) => alive.has(r)) ? [c] : [];
   });
@@ -583,6 +613,8 @@ export type RelationTool =
   | "concentric"
   | "midpoint"
   | "symmetric"
+  | "normal"
+  | "curvature"
   | "fix";
 
 export const RELATION_LABELS: Record<RelationTool, string> = {
@@ -596,6 +628,8 @@ export const RELATION_LABELS: Record<RelationTool, string> = {
   concentric: "Concentric",
   midpoint: "Midpoint",
   symmetric: "Symmetric",
+  normal: "Normal",
+  curvature: "Curvature",
   fix: "Fix",
 };
 
@@ -606,11 +640,13 @@ export const RELATION_HINTS: Record<RelationTool, string> = {
   vertical: "Select one or more lines, or two points",
   parallel: "Select two or more lines",
   perpendicular: "Select two lines",
-  equal: "Select two or more lines, or two or more circles/arcs",
-  tangent: "Select a line and a circle/arc, or two circles/arcs",
-  concentric: "Select two circles or arcs",
+  equal: "Select two or more lines (same length), or two or more circles/arcs (same size)",
+  tangent: "Select two curves to touch smoothly: lines, circles, arcs, splines or ellipses",
+  concentric: "Select two circles, arcs or ellipses",
   midpoint: "Select a point and a line or arc — or three points (the first goes halfway between the other two)",
   symmetric: "Select two points (or two lines, circles or arcs) and then the line they mirror across",
+  normal: "Select a line and a curve: the line meets the curve square on (through the centre of a circle or arc)",
+  curvature: "Select a spline and the line, arc or spline its end joins: they meet smoothly and bend the same amount there",
   fix: "Select the points or shapes to hold in place",
 };
 
@@ -626,6 +662,16 @@ export function mirrorPoint(s: SketchData, axis: SketchLine, [x, y]: [number, nu
   return [2 * fx - x, 2 * fy - y];
 }
 const isRound = (c?: SketchCurve): c is SketchCircle | SketchArc => c?.type === "circle" || c?.type === "arc";
+const isWavy = (c?: SketchCurve): c is SketchSpline | SketchEllipse => c?.type === "spline" || c?.type === "ellipse";
+
+/** The ends of a curve, where another can join it (none for a circle, a whole ellipse or a closed spline). */
+export function curveEnds(c: SketchCurve): string[] {
+  if (c.type === "line") return [c.p1, c.p2];
+  if (c.type === "arc") return [c.start, c.end];
+  if (c.type === "spline") return c.closed ? [] : [c.points[0], c.points[c.points.length - 1]];
+  if (c.type === "ellipse" && c.start && c.end) return [c.start, c.end];
+  return [];
+}
 
 function relationConstraints(s: SketchData, tool: RelationTool, sel: string[]): SketchConstraint[] | string {
   const pts = sel.filter((id) => isPointId(s, id));
@@ -657,8 +703,26 @@ function relationConstraints(s: SketchData, tool: RelationTool, sel: string[]): 
     case "equal":
       if (lines.length >= 2 && lines.length === sel.length) return lines.slice(1).map((l) => mk("equal", [lines[0].id, l.id]));
       if (rounds.length >= 2 && rounds.length === sel.length) return rounds.slice(1).map((r) => mk("equal", [rounds[0].id, r.id]));
+      // Like Onshape: lines are made the same length and circles/arcs the same size, but a line isn't matched to an arc.
+      if (lines.length && rounds.length && lines.length + rounds.length === sel.length)
+        return "Equal makes lines the same length, or circles and arcs the same size — not a line and an arc together. Select only lines, or only circles and arcs.";
       break;
     case "tangent":
+      if (only(2) && crv.length === 2 && crv.some(isWavy)) {
+        // An end that sits on the other curve (without being joined to it) is held there, so they meet smoothly at that point.
+        const held: SketchConstraint[] = [];
+        for (const [one, two] of [[crv[0], crv[1]], [crv[1], crv[0]]] as const) {
+          const path = curveParam(s, two);
+          for (const p of curveEnds(one)) {
+            if (curvePoints(two).includes(p)) continue;
+            const q = pointPos(s, p);
+            const f = path.at(nearestParam(path, q));
+            const joined = s.constraints.some((k) => k.refs[0] === p && k.refs[1] === two.id) || s.constraints.some((k) => k.type === "coincident" && k.refs.includes(p) && k.refs.some((r) => r !== p && curvePoints(two).includes(r)));
+            if (!joined && !held.length && Math.hypot(q[0] - f[0], q[1] - f[1]) < 1e-6) held.push(mk(onCurveType(two), [p, two.id]));
+          }
+        }
+        return [...held, mk("tangent", [crv[0].id, crv[1].id])];
+      }
       if (only(2) && lines.length === 1 && rounds.length === 1) return [mk("tangent", [lines[0].id, rounds[0].id])];
       if (only(2) && rounds.length === 2) {
         const [c1, c2] = rounds;
@@ -669,9 +733,37 @@ function relationConstraints(s: SketchData, tool: RelationTool, sel: string[]): 
         return [mk("tangent", [c1.id, c2.id], [internal ? 1 : 0])];
       }
       break;
-    case "concentric":
-      if (only(2) && rounds.length === 2) return [mk("concentric", [rounds[0].id, rounds[1].id])];
+    case "concentric": {
+      const centred = crv.filter((c) => isRound(c) || c.type === "ellipse");
+      if (only(2) && centred.length === 2) return [mk("concentric", [centred[0].id, centred[1].id])];
       break;
+    }
+    case "normal": {
+      if (only(2) && lines.length === 2) return "Two lines at right angles: use Perpendicular for that. Normal is for a line and a curve.";
+      if (!(only(2) && lines.length === 1 && crv.length === 2)) break;
+      const line = lines[0];
+      const curve = crv.find((c) => c !== line)!;
+      if (isRound(curve)) return [mk("normal", [line.id, curve.id])];
+      // The line's end at (or nearest) the curve is where it meets it square on.
+      const path = curveParam(s, curve);
+      const gap = (id: string) => {
+        const q = pointPos(s, id);
+        const f = path.at(nearestParam(path, q));
+        return Math.hypot(q[0] - f[0], q[1] - f[1]);
+      };
+      return [mk("normal", [line.id, curve.id], [gap(line.p2) < gap(line.p1) ? 1 : 0])];
+    }
+    case "curvature": {
+      if (!only(2) || crv.length !== 2) break;
+      const spline = crv.find((c) => c.type === "spline");
+      if (!spline) return "Curvature joins a spline to what its end meets — select a spline, and the line, arc or spline at its end.";
+      const other = crv.find((c) => c !== spline)!;
+      if (other.type === "circle" || (other.type === "ellipse" && !(other.start && other.end)))
+        return "Curvature needs the spline's end to join the other curve's end. A whole circle or ellipse has no ends — trim it first, or use Tangent.";
+      const joint = curveEnds(spline).find((p) => curveEnds(other).includes(p));
+      if (!joint) return "Curvature needs the spline's end joined to the other curve's end. Drag the end onto it first (so they share a point), then try again.";
+      return [mk("curvature", [spline.id, other.id, joint])];
+    }
     case "midpoint":
       if (only(2) && pts.length === 1 && lines.length === 1) return [mk("midpoint", [pts[0], lines[0].id])];
       // Three points: the first goes halfway between the other two.
@@ -712,6 +804,11 @@ export function applyRelation(s: SketchData, tool: RelationTool, selection: stri
   const made = relationConstraints(s, tool, selection);
   if (typeof made === "string") return { sketch: s, error: made };
   let start = s;
+  if (tool === "curvature") {
+    // Curvature includes meeting smoothly, so a tangent between the same two is replaced.
+    const [a, b] = made[0].refs;
+    start = { ...s, constraints: s.constraints.filter((k) => !(k.type === "tangent" && k.refs.includes(a) && k.refs.includes(b))) };
+  }
   if (tool === "horizontal" || tool === "vertical") {
     // A line already square to the way it's asked to go would be squashed to a
     // point by the nearest solution; turn it about its middle first so the
@@ -1064,6 +1161,11 @@ export function splineHandles(c: SketchSpline): ([number, number] | undefined)[]
   return c.points.map((id) => c.tangents?.[id]);
 }
 
+/** Where a spline arrives at a point differently than it leaves (after Split or Trim), one entry per point. */
+export function splineHandlesIn(c: SketchSpline): ([number, number] | undefined)[] {
+  return c.points.map((id) => c.tangentsIn?.[id]);
+}
+
 /** The nearest place to `p` on a path of short straight pieces. */
 export function nearestOnPath(path: [number, number][], p: [number, number]): [number, number] {
   let best: [number, number] = path[0] ?? p;
@@ -1085,7 +1187,7 @@ export function nearestOnPath(path: [number, number][], p: [number, number]): [n
 
 /** The spline drawn as short straight pieces. */
 export function splinePath(s: SketchData, c: SketchSpline, steps?: number): [number, number][] {
-  return splinePolyline(splinePoints(s, c), c.closed, steps, c.conic, splineHandles(c));
+  return splinePolyline(splinePoints(s, c), c.closed, steps, c.conic, splineHandles(c), splineHandlesIn(c));
 }
 
 /** One end of a spline point's handle: dragging it sets the curve's direction and speed there. */
@@ -1113,8 +1215,9 @@ export function splineHandleEnds(s: SketchData, selection: Iterable<string>): Sp
       const [x, y] = pts[i];
       const [tx, ty] = tangents[i];
       // A handle end sits where the curve's Bézier control is: a third of the tangent out from the point.
+      const [ix, iy] = c.tangentsIn?.[pointId] ?? [tx, ty];
       out.push({ splineId: c.id, pointId, side: 1, at: [x + tx / 3, y + ty / 3] });
-      out.push({ splineId: c.id, pointId, side: -1, at: [x - tx / 3, y - ty / 3] });
+      out.push({ splineId: c.id, pointId, side: -1, at: [x - ix / 3, y - iy / 3] });
     });
   }
   return out;
@@ -1133,14 +1236,24 @@ export function setSplineHandle(s: SketchData, splineId: string, pointId: string
       const tangents = { ...(c.tangents ?? {}) };
       if (tangent) tangents[pointId] = tangent;
       else delete tangents[pointId];
-      const { tangents: _old, ...rest } = c;
+      // One handle through the point again: it arrives the way it leaves.
+      const tangentsIn = { ...(c.tangentsIn ?? {}) };
+      delete tangentsIn[pointId];
+      const { tangents: _old, tangentsIn: _oldIn, ...rest } = c;
       void _old;
-      return Object.keys(tangents).length ? { ...rest, tangents } : rest;
+      void _oldIn;
+      return { ...rest, ...(Object.keys(tangents).length ? { tangents } : {}), ...(Object.keys(tangentsIn).length ? { tangentsIn } : {}) };
     }),
   };
 }
 
 /** An ellipse as short straight pieces (closed: the last point repeats the first). */
 export function ellipsePoints(s: SketchData, c: SketchEllipse, steps = 64): [number, number][] {
+  if (c.start && c.end) {
+    // Part of an ellipse: just that stretch.
+    const { g, t0, t1 } = ellipseSpan(s, c);
+    const n = Math.max(4, Math.ceil((steps * (t1 - t0)) / (2 * Math.PI)));
+    return Array.from({ length: n + 1 }, (_, i) => ellipseAtParam(g, t0 + ((t1 - t0) * i) / n));
+  }
   return ellipsePolyline(ellipseGeom(s, c), steps);
 }

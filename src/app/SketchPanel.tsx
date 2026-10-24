@@ -221,7 +221,7 @@ export function SketchPanel() {
             )}
             <p className="dialog-hint">
               {patternKind === "linear"
-                ? "Direction 0° goes right, 90° goes up. The count includes the original."
+                ? "Direction 0° goes right, 90° goes up. The count includes the original. The copies follow the originals (and the line, if you took the direction from one)."
                 : `Going round ${patternCentre === "origin" ? "the origin" : "the chosen point"} — click any point (a circle's centre, a line's end, a corner of the face) to go round that instead. 360° spreads them all the way round.`}
             </p>
             <button type="button" className="primary-button" onClick={() => makeSketchPattern()} disabled={selectionCount === 0}>
